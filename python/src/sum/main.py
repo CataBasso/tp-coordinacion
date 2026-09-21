@@ -54,18 +54,25 @@ class SumFilter:
                 message_protocol.internal.serialize([client_id])
             )
 
+    # Asigna de forma determinística cada fruta a una réplica de aggregation.
+    def _partition_for_fruit(self, fruit):
+        accumulated = 0
+        for char in fruit:
+            accumulated = (accumulated * 31 + ord(char)) % AGGREGATION_AMOUNT
+        return accumulated
+
     def _flush_client(self, client_id):
         logging.info(f"Flushing client {client_id} (sum replica {ID})")
         with self.lock:
             amount_by_fruit = self.amount_by_client.pop(client_id, {})
 
         for final_fruit_item in amount_by_fruit.values():
-            for data_output_exchange in self.data_output_exchanges:
-                data_output_exchange.send(
-                    message_protocol.internal.serialize(
-                        [client_id, final_fruit_item.fruit, final_fruit_item.amount, ID]
-                    )
+            partition = self._partition_for_fruit(final_fruit_item.fruit)
+            self.data_output_exchanges[partition].send(
+                message_protocol.internal.serialize(
+                    [client_id, final_fruit_item.fruit, final_fruit_item.amount, ID]
                 )
+            )
 
         logging.info(f"Broadcasting EOF message for client {client_id}")
         for data_output_exchange in self.data_output_exchanges:
