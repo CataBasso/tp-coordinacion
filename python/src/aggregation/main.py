@@ -1,5 +1,6 @@
 import os
 import logging
+import signal
 
 from common import middleware, message_protocol, fruit_item
 
@@ -59,11 +60,34 @@ class AggregationFilter:
     def start(self):
         self.input_exchange.start_consuming(self.process_messsage)
 
+    def stop(self):
+        try:
+            self.input_exchange.stop_consuming()
+        except middleware.MessageMiddlewareDisconnectedError as e:
+            logging.error(f"Error stopping aggregation consumer: {e}")
+
+    def close(self):
+        for resource in (self.input_exchange, self.output_queue):
+            try:
+                resource.close()
+            except middleware.MessageMiddlewareCloseError as e:
+                logging.error(f"Error closing aggregation resource: {e}")
 
 def main():
     logging.basicConfig(level=logging.INFO)
     aggregation_filter = AggregationFilter()
-    aggregation_filter.start()
+
+    def handle_sigterm(signum, frame):
+        logging.info("SIGTERM received, stopping aggregation gracefully")
+        aggregation_filter.stop()
+
+    signal.signal(signal.SIGTERM, handle_sigterm)
+
+    try:
+        aggregation_filter.start()
+    finally:
+        aggregation_filter.close()
+
     return 0
 
 

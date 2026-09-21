@@ -1,6 +1,7 @@
 import os
 import logging
 import threading
+import signal
 
 from common import middleware, message_protocol, fruit_item
 
@@ -100,11 +101,35 @@ class SumFilter:
         control_thread.start()
         self.input_queue.start_consuming(self.process_data_messsage)
 
+    def stop(self):
+        for resource in (self.input_queue, self.control_input):
+            try:
+                resource.stop_consuming()
+            except middleware.MessageMiddlewareDisconnectedError as e:
+                logging.error(f"Error stopping sum consumer: {e}")
+
+    def close(self):
+        for resource in (self.input_queue, self.control_input):
+            try:
+                resource.close()
+            except middleware.MessageMiddlewareCloseError as e:
+                logging.error(f"Error closing sum resource: {e}")
 
 def main():
     logging.basicConfig(level=logging.INFO)
     sum_filter = SumFilter()
-    sum_filter.start()
+
+    def handle_sigterm(signum, frame):
+        logging.info("SIGTERM received, stopping sum gracefully")
+        sum_filter.stop()
+
+    signal.signal(signal.SIGTERM, handle_sigterm)
+
+    try:
+        sum_filter.start()
+    finally:
+        sum_filter.close()
+
     return 0
 
 
