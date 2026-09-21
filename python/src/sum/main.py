@@ -18,51 +18,81 @@ class SumFilter:
         self.input_queue = middleware.MessageMiddlewareQueueRabbitMQ(
             MOM_HOST, INPUT_QUEUE
         )
+        self.control_input = middleware.MessageMiddlewareExchangeRabbitMQ(
+            MOM_HOST, SUM_CONTROL_EXCHANGE, [f"{SUM_PREFIX}_control_{ID}"]
+        )
+
+        self.control_output_exchanges = []
+        for i in range(SUM_AMOUNT):
+            control_output_exchange = middleware.MessageMiddlewareExchangeRabbitMQ(
+                MOM_HOST, SUM_CONTROL_EXCHANGE, [f"{SUM_PREFIX}_control_{i}"]
+            )
+            self.control_output_exchanges.append(control_output_exchange)
+
         self.data_output_exchanges = []
         for i in range(AGGREGATION_AMOUNT):
             data_output_exchange = middleware.MessageMiddlewareExchangeRabbitMQ(
                 MOM_HOST, AGGREGATION_PREFIX, [f"{AGGREGATION_PREFIX}_{i}"]
             )
             self.data_output_exchanges.append(data_output_exchange)
+
         self.amount_by_client = {}
+        self.lock = threading.Lock()
 
     def _process_data(self, client_id, fruit, amount):
         logging.info(f"Processing data for client {client_id}")
+        with self.lock:
+            amount_by_fruit = self.amount_by_client.setdefault(client_id, {})
+            amount_by_fruit[fruit] = amount_by_fruit.get(
+                fruit, fruit_item.FruitItem(fruit, 0)
+            ) + fruit_item.FruitItem(fruit, int(amount))
 
-        if client_id not in self.amount_by_client:
-            self.amount_by_client[client_id] = {}
+    def _broadcast_eof(self, client_id):
+        logging.info(f"Client {client_id} finished, notifying every Sum replica")
+        for control_output_exchange in self.control_output_exchanges:
+            control_output_exchange.send(
+                message_protocol.internal.serialize([client_id])
+            )
 
-        amount_by_fruit = self.amount_by_client[client_id]
-        amount_by_fruit[fruit] = amount_by_fruit.get(
-            fruit, fruit_item.FruitItem(fruit, 0)
-        ) + fruit_item.FruitItem(fruit, int(amount))
+    def _flush_client(self, client_id):
+        logging.info(f"Flushing client {client_id} (sum replica {ID})")
+        with self.lock:
+            amount_by_fruit = self.amount_by_client.pop(client_id, {})
 
-    def _process_eof(self, client_id):
-        logging.info(f"Broadcasting data messages for client {client_id}")
-        amount_by_fruit = self.amount_by_client.pop(client_id, {})
         for final_fruit_item in amount_by_fruit.values():
             for data_output_exchange in self.data_output_exchanges:
                 data_output_exchange.send(
                     message_protocol.internal.serialize(
-                        [client_id, final_fruit_item.fruit, final_fruit_item.amount]
+                        [client_id, final_fruit_item.fruit, final_fruit_item.amount, ID]
                     )
                 )
 
-        logging.info(f"Broadcasting EOF message")
+        logging.info(f"Broadcasting EOF message for client {client_id}")
         for data_output_exchange in self.data_output_exchanges:
-            data_output_exchange.send(message_protocol.internal.serialize([client_id]))
-
+            data_output_exchange.send(message_protocol.internal.serialize([client_id, ID]))
 
     def process_data_messsage(self, message, ack, nack):
         fields = message_protocol.internal.deserialize(message)
         if len(fields) == 3:
             self._process_data(*fields)
         else:
-            self._process_eof(fields[0])
+            self._broadcast_eof(fields[0])
+        ack()
+
+    def process_control_message(self, message, ack, nack):
+        fields = message_protocol.internal.deserialize(message)
+        self._flush_client(fields[0])
         ack()
 
     def start(self):
+        control_thread = threading.Thread(
+            target=self.control_input.start_consuming,
+            args=(self.process_control_message,),
+            daemon=True,
+        )
+        control_thread.start()
         self.input_queue.start_consuming(self.process_data_messsage)
+
 
 def main():
     logging.basicConfig(level=logging.INFO)

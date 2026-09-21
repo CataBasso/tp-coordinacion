@@ -22,11 +22,40 @@ class JoinFilter:
         self.output_queue = middleware.MessageMiddlewareQueueRabbitMQ(
             MOM_HOST, OUTPUT_QUEUE
         )
+        self.merged_by_client = {}
+        self.received_by_client = {}
+
+    def _merge_partial(self, client_id, fruit_top):
+        merged = self.merged_by_client.setdefault(client_id, {})
+        for fruit, amount in fruit_top:
+            merged[fruit] = merged.get(
+                fruit, fruit_item.FruitItem(fruit, 0)
+            ) + fruit_item.FruitItem(fruit, amount)
 
     def process_messsage(self, message, ack, nack):
-        logging.info("Received top")
-        fruit_top = message_protocol.internal.deserialize(message)
-        self.output_queue.send(message_protocol.internal.serialize(fruit_top))
+        client_id, fruit_top = message_protocol.internal.deserialize(message)
+
+        logging.info(f"Received partial top for client {client_id}")
+        self._merge_partial(client_id, fruit_top)
+
+        received = self.received_by_client.get(client_id, 0) + 1
+        self.received_by_client[client_id] = received
+
+        if received < AGGREGATION_AMOUNT:
+            ack()
+            return
+
+        logging.info(f"Got every partial top for client {client_id}, joining")
+        merged = self.merged_by_client.pop(client_id)
+        self.received_by_client.pop(client_id)
+
+        final_chunk = sorted(merged.values())[-TOP_SIZE:]
+        final_chunk.reverse()
+        final_top = [(item.fruit, item.amount) for item in final_chunk]
+
+        self.output_queue.send(
+            message_protocol.internal.serialize([client_id, final_top])
+        )
         ack()
 
     def start(self):
