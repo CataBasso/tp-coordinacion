@@ -39,6 +39,8 @@ class SumFilter:
 
         self.amount_by_client = {}
         self.lock = threading.Lock()
+        self.condition = threading.Condition(self.lock)
+        self.processing_clients = set()
 
     def _process_data(self, client_id, fruit, amount):
         logging.info(f"Processing data for client {client_id}")
@@ -82,14 +84,29 @@ class SumFilter:
     def process_data_messsage(self, message, ack, nack):
         fields = message_protocol.internal.deserialize(message)
         if len(fields) == 3:
-            self._process_data(*fields)
+            client_id = fields[0]
+            with self.condition:
+                self.processing_clients.add(client_id)
+            
+            try:
+                self._process_data(*fields)
+                ack()
+            finally:
+                with self.condition:
+                    self.processing_clients.remove(client_id)
+                    self.condition.notify_all()
         else:
             self._broadcast_eof(fields[0])
-        ack()
+            ack()
 
     def process_control_message(self, message, ack, nack):
         fields = message_protocol.internal.deserialize(message)
-        self._flush_client(fields[0])
+        client_id = fields[0]
+        with self.condition:
+            while client_id in self.processing_clients:
+                self.condition.wait()
+
+        self._flush_client(client_id)
         ack()
 
     def start(self):
