@@ -4,7 +4,9 @@
 
 ### Sum
 
-Se pueden tener multiples replicas de `Sum` para cada cliente y asi reducir el tiempo de procesamiento. Cada instancia de `Sum` recibe mensajes de la cola de entrada del `Gateway`. Puede recibir dos tipos de mensaje:
+Se pueden tener multiples replicas de `Sum` para cada cliente y asi reducir el tiempo de procesamiento. Cada réplica de `Sum` recibe información a través de dos canales: una cola de datos compartida con el `Gateway` y una cola asociada al exchange de control, donde recibe los EOF enviados por las demás réplicas.
+
+De la cola de entrada del `Gateway`, puede recibir dos tipos de mensaje:
 
 1. Mensaje con datos, formado por: 
     - client id
@@ -14,8 +16,6 @@ Se pueden tener multiples replicas de `Sum` para cada cliente y asi reducir el t
 2. EOF: cuando el `Gateway` termina de enviar los datos de cada cliente, envia un mensaje de fin. Este mensaje solamente contiene el client id. 
 
 Cuando una replica recibe un mensaje que solo contiene el client_id, entiende que ya no hay mas datos sobre ese cliente y notifica al resto de las instancias mediante un exchange de control. 
-
-cada réplica de `Sum` recibe información a través de dos canales: una cola de datos compartida con el `Gateway` y una cola asociada al exchange de control, donde recibe los EOF enviados por las demás réplicas.
 
 De esta manera, todas las instancias de `Sum` reciben una notificación de que ese cliente terminó. Al recibirla, cada instancia realiza un `flush` de los datos que acumuló para ese cliente. Para evitar que esta accion se realice mientras una instancia todavía está procesando un mensaje de datos del mismo cliente, se utiliza un `Lock` junto con una `Condition` en vez de ejecutar `flush` sin cheaquear nada antes. El `Lock` protege el acceso concurrente a los diccionarios que guardan los datos, mientras que la `Condition` permite que el procesamiento del `EOF` espere hasta que termine el procesamiento del dato que se encuentra actualmente en curso. Osea, cuando se recibe un EOF de otra replica, existe una especie de barrera que primero espera a que si hay un mensaje de ese mismo client_id procesandose, termine y luego se envien los datos acumulados a `Aggregation`.   
 
